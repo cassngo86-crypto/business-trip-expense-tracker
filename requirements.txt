@@ -1,0 +1,7 @@
+streamlit
+pandas
+plotly
+pytesseract
+pillow
+groq
+python-dotenv
