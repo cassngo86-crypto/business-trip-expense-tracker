@@ -71,3 +71,26 @@ def fetch_receipt_file(expense_id):
             "category": row[2]
         }
     return None
+
+def get_expense_trend(conn):
+    """Fetches total daily spending for trend timeline analysis."""
+    query = """
+        SELECT date, SUM(amount) as total_amount 
+        FROM expenses 
+        GROUP BY date 
+        ORDER BY date ASC
+    """
+    df = pd.read_sql_query(query, conn)
+    if not df.empty:
+        df['date'] = pd.to_datetime(df['date'])
+    return df
+
+def get_category_breakdown(conn):
+    """Fetches total spending grouped by expense categories."""
+    query = """
+        SELECT category, SUM(amount) as total_amount 
+        FROM expenses 
+        GROUP BY category 
+        ORDER BY total_amount DESC
+    """
+    return pd.read_sql_query(query, conn)
