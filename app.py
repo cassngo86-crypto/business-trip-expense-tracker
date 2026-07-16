@@ -367,60 +367,102 @@ with tab2:
                 st.rerun()
 
 # =====================================================================
-# 📊 TAB 3: INSIGHTS & ANALYTICS
+# 📊 TAB 3: INSIGHTS & ANALYTICS (With Dynamic Filters)
 # =====================================================================
 with tab3:
     st.header("📊 Financial Analytics & Insights")
     
-    # Connect directly to your database pipeline aggregates
-    try:
-        # Connect to dynamic SQL analytical handlers
-        conn_analytics = sqlite3.connect("expenses.db")
-        df_trend = get_expense_trend(conn_analytics)
-        df_category = get_category_breakdown(conn_analytics)
-        conn_analytics.close()
-    except Exception as e:
-        # Safe fallback array if the database table is completely cold
-        df_trend = pd.DataFrame(columns=['date', 'total_amount'])
-        df_category = pd.DataFrame(columns=['category', 'total_amount'])
-        
-    if not df_trend.empty and not df_category.empty:
-        # Convert date column to explicitly support smooth timeline rendering
-        df_trend['date'] = pd.to_datetime(df_trend['date'])
-        
-        # Generate responsive dual-column metrics presentation
-        chart_col1, chart_col2 = st.columns(2, gap="large")
-        
-        with chart_col1:
-            st.subheader("📈 Spending Timeline Trend")
-            fig_trend = px.area(
-                df_trend, 
-                x="date", 
-                y="total_amount",
-                labels={"date": "Timeline Date", "total_amount": "Total Expenditure ($)"},
-                template="plotly_white"
-            )
-            fig_trend.update_traces(line_color="#1F77B4", line_width=2.5)
-            fig_trend.update_layout(
-                margin=dict(l=15, r=15, t=25, b=15), 
-                hovermode="x unified",
-                xaxis_title="Date Range",
-                yaxis_title="Converted Amount (SGD)"
-            )
-            st.plotly_chart(fig_trend, use_container_width=True)
-            
-        with chart_col2:
-            st.subheader("🍕 Allocation by Category")
-            fig_pie = px.pie(
-                df_category, 
-                values="total_amount", 
-                names="category",
-                hole=0.4,
-                color_discrete_sequence=px.colors.qualitative.Safe # Accessible, colorblind friendly palettes
-            )
-            fig_pie.update_layout(margin=dict(l=15, r=15, t=25, b=15))
-            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-            st.plotly_chart(fig_pie, use_container_width=True)
-            
-    else:
+    if df.empty:
         st.info("💡 Keep log entries rolling! Visual trend timelines and allocations will display right here as soon as historical records are saved.")
+    else:
+        # 1. TIMELINE FILTER CONTROLS (By Week, Month, Year)
+        st.subheader("⚙️ Analytics Filter")
+        
+        filter_col1, filter_col2 = st.columns([1, 2])
+        
+        with filter_col1:
+            time_filter_type = st.radio(
+                "Group Analytics By:",
+                ["📅 Specific Month", "📆 Specific Week", "🗓️ Specific Year", "♾️ All-Time"],
+                horizontal=False,
+                key="analytics_time_filter"
+            )
+            
+        # Get unique years, months, and weeks from our dataset for the selection dropdowns
+        df_for_filtering = df.copy()
+        df_for_filtering['year'] = df_for_filtering['date'].dt.year
+        df_for_filtering['month_name'] = df_for_filtering['date'].dt.strftime('%B %Y')
+        df_for_filtering['week_commencing'] = df_for_filtering['date'].dt.to_period('W').apply(lambda r: r.start_time)
+        
+        # Format weeks nicely for selection
+        df_for_filtering['week_label'] = df_for_filtering['week_commencing'].dt.strftime('Week of %d %b %Y')
+
+        # Dropdowns based on the radio selection
+        with filter_col2:
+            if "Specific Month" in time_filter_type:
+                unique_months = sorted(df_for_filtering['month_name'].unique(), reverse=True)
+                selected_month = st.selectbox("Select Month to Analyze:", unique_months, key="select_month_analytics")
+                analytics_df = df_for_filtering[df_for_filtering['month_name'] == selected_month].copy()
+                
+            elif "Specific Week" in time_filter_type:
+                unique_weeks = df_for_filtering[['week_commencing', 'week_label']].drop_duplicates().sort_values(by='week_commencing', ascending=False)
+                selected_week_label = st.selectbox("Select Week Commencing:", unique_weeks['week_label'].unique(), key="select_week_analytics")
+                analytics_df = df_for_filtering[df_for_filtering['week_label'] == selected_week_label].copy()
+                
+            elif "Specific Year" in time_filter_type:
+                unique_years = sorted(df_for_filtering['year'].unique(), reverse=True)
+                selected_year = st.selectbox("Select Year to Analyze:", unique_years, key="select_year_analytics")
+                analytics_df = df_for_filtering[df_for_filtering['year'] == selected_year].copy()
+                
+            else:  # All-Time
+                st.write("📈 Showing complete system history across all logged transactions.")
+                analytics_df = df_for_filtering.copy()
+
+        st.markdown("---")
+
+        # 2. RUN GRAPH CALCULATIONS ON FILTERED DATA
+        if not analytics_df.empty:
+            # Aggregate trends for the filtered dataset
+            df_trend = analytics_df.groupby('date')['amount'].sum().reset_index().rename(columns={'amount': 'total_amount'})
+            df_trend = df_trend.sort_values(by='date')
+            
+            # Aggregate category breakdowns for the filtered dataset
+            df_category = analytics_df.groupby('category')['amount'].sum().reset_index().rename(columns={'amount': 'total_amount'})
+            df_category = df_category.sort_values(by='total_amount', ascending=False)
+            
+            # 3. GENERATE RESPONSIVE CHARTS
+            chart_col1, chart_col2 = st.columns(2, gap="large")
+            
+            with chart_col1:
+                st.subheader("📈 Spending Timeline Trend")
+                fig_trend = px.area(
+                    df_trend, 
+                    x="date", 
+                    y="total_amount",
+                    labels={"date": "Timeline Date", "total_amount": "Total Expenditure ($)"},
+                    template="plotly_white"
+                )
+                fig_trend.update_traces(line_color="#1F77B4", line_width=2.5)
+                fig_trend.update_layout(
+                    margin=dict(l=15, r=15, t=25, b=15), 
+                    hovermode="x unified",
+                    xaxis_title="Date Range",
+                    yaxis_title="Amount (SGD)"
+                )
+                st.plotly_chart(fig_trend, use_container_width=True)
+                
+            with chart_col2:
+                st.subheader("🍕 Allocation by Category")
+                fig_pie = px.pie(
+                    df_category, 
+                    values="total_amount", 
+                    names="category",
+                    hole=0.4,
+                    color_discrete_sequence=px.colors.qualitative.Safe # Accessible, colorblind-friendly palette
+                )
+                fig_pie.update_layout(margin=dict(l=15, r=15, t=25, b=15))
+                fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig_pie, use_container_width=True)
+                
+        else:
+            st.warning("⚠️ No records match the selected timeline filter. Check another date option!")
