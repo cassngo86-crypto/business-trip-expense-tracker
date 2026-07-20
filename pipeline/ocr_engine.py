@@ -7,17 +7,15 @@ import urllib.request
 from dotenv import load_dotenv
 from groq import Groq
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 import io
 
 load_dotenv()
 
 # Adaptive OS detection strategy for cloud deployment
 if sys.platform.startswith('win'):
-    # Local Windows development environment path
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 else:
-    # Linux cloud environment path (Streamlit Cloud / AWS / Heroku)
     pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
 
@@ -35,22 +33,39 @@ def get_exchange_rate(from_currency: str, to_currency: str = "SGD") -> float:
                 data = json.loads(response.read().decode())
                 if data.get("result") == "success":
                     return float(data["conversion_rates"].get(to_currency, 1.0))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Exchange Rate API error: {e}")
 
     fallbacks = {"USD": 1.34, "EUR": 1.45, "MYR": 0.31, "JPY": 0.0088}
     return fallbacks.get(from_currency, 1.0)
 
 
+def preprocess_mobile_image(image_bytes: bytes) -> Image.Image:
+    """Fixes camera orientation (EXIF) and enhances image contrast for OCR."""
+    img = Image.open(io.BytesIO(image_bytes))
+    
+    # Auto-rotate based on EXIF tag (critical for photos taken on mobile phones)
+    img = ImageOps.exif_transpose(img)
+    
+    # Convert to Grayscale
+    img = img.convert('L')
+    
+    # Enhance contrast to clean up mobile shadows
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(2.0)
+    
+    return img
+
+
 def infer_category(full_text: str, merchant: str = "") -> str:
-    """Classifies category based on keyword matching across merchant & body text."""
+    """Flexible keyword engine for robust category assignment."""
     combined = f"{merchant} {full_text}".upper()
 
     category_map = {
-        "Healthcare": ["POLYCLINIC", "SUBSIDY", "CHARGES", "CLINIC", "INVESTIGATIONS", "HEALTHCARE", "DOCTOR", "HOSPITAL", "PHARMACY", "SINGHEALTH", "NATIONAL HEALTHCARE"],
-        "Dining": ["RESTAURANT", "CAFÉ", "CAFE", "STARBUCKS", "MCDONALD", "KFC", "FOOD", "DINING", "BISTRO", "BAR", "COFFEE", "BAKERY", "EATERY"],
-        "Transport": ["GRAB", "TAXI", "UBER", "COMFORT", "SMRT", "TRANSIT", "AIRPORT", "SINGAPORE AIRLINES", "SHELL", "PETROL", "PARKING", "SMRT", "TBT"],
-        "Grocery": ["FAIRPRICE", "COLD STORAGE", "SHENG SIONG", "GIANT", "SUPERMARKET", "GROCERY", "DON DON DONKI"],
+        "Healthcare": ["POLYCLINIC", "SUBSIDY", "CHARGES", "CLINIC", "INVESTIGATIONS", "HEALTHCARE", "DOCTOR", "HOSPITAL", "PHARMACY", "SINGHEALTH", "NATIONAL HEALTHCARE", "MEDICAL"],
+        "Dining": ["RESTAURANT", "CAFÉ", "CAFE", "STARBUCKS", "MCDONALD", "KFC", "FOOD", "DINING", "BISTRO", "BAR", "COFFEE", "BAKERY", "EATERY", "MCD", "SUBWAY"],
+        "Transport": ["GRAB", "TAXI", "UBER", "COMFORT", "SMRT", "TRANSIT", "AIRPORT", "SINGAPORE AIRLINES", "SHELL", "PETROL", "PARKING", "TBT", "BUS", "LTA"],
+        "Grocery": ["FAIRPRICE", "COLD STORAGE", "SHENG SIONG", "GIANT", "SUPERMARKET", "GROCERY", "DON DON DONKI", "NTUC"],
         "Lodging": ["HOTEL", "HOSTEL", "INN", "SUITES", "AIRBNB", "RESORT", "LODGING", "STAY"],
         "Utilities": ["TELECOM", "SINGTEL", "STARHUB", "M1", "ELECTRIC", "WATER", "POWER", "UTILITIES"]
     }
@@ -63,14 +78,16 @@ def infer_category(full_text: str, merchant: str = "") -> str:
 
 
 def parse_total_amount(text: str) -> float:
-    """Regex pipeline to accurately extract total amount from receipt text."""
-    # Specific patterns target common receipt keywords
+    """Robust pattern search for receipt total amount."""
+    clean_text = text.upper()
+
+    # Search pattern for standard receipt total keywords
     amt_patterns = [
-        r'(?:AFTER\s*GOVT\s*SUBSIDY|NETT\s*PAYABLE|TOTAL\s*AMT|GRAND\s*TOTAL|TOTAL\s*DUE|AMOUNT\s*DUE|TOTAL|NET)[:\s]*[\$\¥\€\£]?\s*([0-9]+[\.\,][0-9]{2})',
-        r'(?:SGD|USD|EUR|MYR|JPY)\s*[\$]?\s*([0-9]+[\.\,][0-9]{2})'
+        r'(?:AFTER\s*GOVT\s*SUBSIDY|NETT\s*PAYABLE|TOTAL\s*AMT|GRAND\s*TOTAL|TOTAL\s*DUE|AMOUNT\s*DUE|TOTAL|NET)\b[:\s]*[\$\¥\€\£]?\s*([0-9]+[\.\,][0-9]{2})',
+        r'(?:SGD|USD|EUR|MYR|JPY)\s*[\$]?\s*([0-9]+[\.\,][0-9]{2})',
+        r'TOTAL[\s\S]*?([0-9]+\.[0-9]{2})'
     ]
 
-    clean_text = text.upper()
     for pattern in amt_patterns:
         match = re.search(pattern, clean_text)
         if match:
@@ -80,8 +97,8 @@ def parse_total_amount(text: str) -> float:
             except ValueError:
                 continue
 
-    # Fallback: find all standard price patterns ($xx.xx) and pick the maximum value
-    all_amounts = re.findall(r'[\$\s]([0-9]+\.[0-9]{2})\b', text)
+    # Fallback: Extract all floating-point values ($xx.xx format) and select the maximum
+    all_amounts = re.findall(r'([0-9]+\.[0-9]{2})', text)
     if all_amounts:
         try:
             return max([float(a) for a in all_amounts])
@@ -92,16 +109,16 @@ def parse_total_amount(text: str) -> float:
 
 
 def fallback_local_ocr(image_bytes: bytes) -> dict:
-    """
-    Secure Local Backup: Uses Tesseract OCR with enhanced regex parsing logic
-    for date, category, and total amount extraction.
-    """
+    """Local Tesseract parsing fallback."""
     try:
-        img = Image.open(io.BytesIO(image_bytes))
+        img = preprocess_mobile_image(image_bytes)
         full_text = pytesseract.image_to_string(img)
+        
+        print(f"--- RAW TESSERACT OCR OUTPUT ---\n{full_text}\n------------------------------")
+
         lines = [line.strip() for line in full_text.split('\n') if line.strip()]
 
-        # 1. Merchant Extraction (Default to first non-empty line if not matched)
+        # Merchant detection
         org = lines[0] if lines else "Unknown Merchant"
         if any(k in full_text.upper() for k in ["NATIONAL HEALTHCARE", "POLYCLINICS", "HOUGANG POLYCLINIC"]):
             org = "National Healthcare Group Polyclinics"
@@ -110,8 +127,8 @@ def fallback_local_ocr(image_bytes: bytes) -> dict:
         elif "FAIRPRICE" in full_text.upper():
             org = "FairPrice Group"
 
-        # 2. Date Extraction
-        dt = "2026-07-14"
+        # Date detection
+        dt = "2026-07-20"
         date_match = re.search(r'(\d{2})[/.-](\d{2})[/.-](\d{4})', full_text)
         if date_match:
             dt = f"{date_match.group(3)}-{date_match.group(2)}-{date_match.group(1)}"
@@ -120,10 +137,7 @@ def fallback_local_ocr(image_bytes: bytes) -> dict:
             if iso_match:
                 dt = f"{iso_match.group(1)}-{iso_match.group(2)}-{iso_match.group(3)}"
 
-        # 3. Total Amount Extraction
         amount = parse_total_amount(full_text)
-
-        # 4. Category Classification
         cat = infer_category(full_text, org)
 
         return {
@@ -141,39 +155,47 @@ def fallback_local_ocr(image_bytes: bytes) -> dict:
             "original_amount": 0.0,
             "currency": "SGD",
             "total_amount": 0.0,
-            "date": "2026-07-14",
+            "date": "2026-07-20",
             "category": "Miscellaneous"
         }
 
 
 def extract_receipt_data(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
-    """
-    Multi-modal parser with cloud vision processing and an isolated local backup block.
-    """
+    """Primary extraction using Groq vision API with fallbacks."""
     if not image_bytes:
         return fallback_local_ocr(image_bytes)
 
-    client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        print("GROQ_API_KEY missing, using local OCR fallback.")
+        return fallback_local_ocr(image_bytes)
+
+    client = Groq(api_key=api_key)
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     data_url = f"data:{mime_type};base64,{base64_image}"
 
     prompt = """
-    Scan this invoice/receipt image to extract exactly 5 specific data fields. 
-    Output ONLY a raw, unformatted JSON object. Do not wrap in markdown blocks like ```json.
-    
-    Target Schema:
-    {"organization": "Merchant Name", "original_amount": 0.00, "currency": "SGD", "date": "YYYY-MM-DD", "category": "Healthcare"}
-    
-    Processing Rules:
-    - organization: Top prominent corporate entity or clinic identity name.
-    - original_amount: Final total payable float value (e.g. Grand Total, Nett Payable, Total Due, or Total Amt After Subsidy).
-    - category: Choose strictly from [Dining, Grocery, Transport, Utilities, Lodging, Healthcare, Miscellaneous].
-    - date: Transaction date formatted as YYYY-MM-DD.
+    Scan this receipt/invoice image carefully to extract 5 structured values:
+    Return ONLY a single valid raw JSON object. Do NOT wrap in ```json ``` blocks.
+
+    JSON Format:
+    {
+      "organization": "Merchant or Clinic Name",
+      "original_amount": 0.00,
+      "currency": "SGD",
+      "date": "YYYY-MM-DD",
+      "category": "Dining"
+    }
+
+    Rules:
+    - original_amount: Final total amount paid (e.g. Total, Grand Total, Nett Payable). Must be float.
+    - category: Must be strictly one of: [Dining, Grocery, Transport, Utilities, Lodging, Healthcare, Miscellaneous].
+    - date: Format YYYY-MM-DD.
     """
 
     try:
         completion = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview",
+            model="qwen/qwen3.6-27b",
             messages=[{
                 "role": "user",
                 "content": [
@@ -185,24 +207,26 @@ def extract_receipt_data(image_bytes: bytes, mime_type: str = "image/jpeg") -> d
         )
 
         raw_content = completion.choices[0].message.content.strip()
+        print(f"--- GROQ RAW RESPONSE ---\n{raw_content}\n-------------------------")
+
         json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
         parsed_json = json.loads(json_match.group(0)) if json_match else json.loads(raw_content)
 
         org = parsed_json.get("organization") or "Unknown Merchant"
         orig_amount = float(parsed_json.get("original_amount") or 0.0)
         currency = str(parsed_json.get("currency") or "SGD").upper().strip()
-        dt = parsed_json.get("date") or "2026-07-14"
+        dt = parsed_json.get("date") or "2026-07-20"
         cat = parsed_json.get("category") or "Miscellaneous"
 
-        # If Groq missed crucial fields, fallback to local OCR
+        # If Groq returns empty/partial values, patch with local OCR fallback
         if org == "Unknown Merchant" or orig_amount == 0.0 or cat == "Miscellaneous":
-            fallback_res = fallback_local_ocr(image_bytes)
+            local_res = fallback_local_ocr(image_bytes)
             if orig_amount == 0.0:
-                orig_amount = fallback_res["original_amount"]
+                orig_amount = local_res["original_amount"]
             if org == "Unknown Merchant":
-                org = fallback_res["organization"]
+                org = local_res["organization"]
             if cat == "Miscellaneous":
-                cat = fallback_res["category"]
+                cat = local_res["category"]
 
         rate = get_exchange_rate(currency, "SGD")
         return {
@@ -213,5 +237,6 @@ def extract_receipt_data(image_bytes: bytes, mime_type: str = "image/jpeg") -> d
             "date": dt,
             "category": cat
         }
-    except Exception:
+    except Exception as e:
+        print(f"Groq API Error: {e}. Falling back to Tesseract OCR...")
         return fallback_local_ocr(image_bytes)
