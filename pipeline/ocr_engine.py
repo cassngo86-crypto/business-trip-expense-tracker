@@ -126,10 +126,13 @@ def fallback_local_ocr(image_bytes: bytes) -> dict:
 
 def extract_receipt_data(image_input, mime_type: str = "image/jpeg") -> dict:
     """
-    Accepts both raw bytes or Streamlit's UploadedFile object and auto-resets read pointers.
+    Safely converts image_input (UploadedFile, BytesIO, or bytes) into raw bytes
+    and executes extraction.
     """
-    # Fix Streamlit BytesIO pointer exhaustion
-    if hasattr(image_input, "seek"):
+    # 1. Safely extract raw bytes from Streamlit UploadedFile or BytesIO
+    if hasattr(image_input, "getvalue"):
+        image_bytes = image_input.getvalue()
+    elif hasattr(image_input, "read"):
         image_input.seek(0)
         image_bytes = image_input.read()
     elif isinstance(image_input, bytes):
@@ -176,7 +179,7 @@ def extract_receipt_data(image_input, mime_type: str = "image/jpeg") -> dict:
                 ]
             }],
             response_format={"type": "json_object"},
-            reasoning_format="hidden", # Critical fix for Qwen reasoning JSON output on Groq
+            reasoning_format="hidden",
             temperature=0.1
         )
 
@@ -189,7 +192,6 @@ def extract_receipt_data(image_input, mime_type: str = "image/jpeg") -> dict:
         dt = parsed_json.get("date") or "2026-07-20"
         cat = parsed_json.get("category") or "Miscellaneous"
 
-        # If vision model fails to parse specific fields, fall back locally to fill missing items
         if orig_amount == 0.0 or cat == "Miscellaneous":
             local_res = fallback_local_ocr(image_bytes)
             if orig_amount == 0.0:
