@@ -79,6 +79,24 @@ else:
     # Ensure dates are uniform
     df['date'] = pd.to_datetime(df['date'])
 
+# Standardized Categories across manual and OCR entries
+ALL_CATEGORIES = [
+    "Dining",
+    "Grocery",
+    "Transport",
+    "Utilities",
+    "Lodging",
+    "Healthcare",
+    "Miscellaneous"
+]
+
+# Standardized Currencies
+ALL_CURRENCIES = [
+    "SGD", "USD", "EUR", "JPY", "CHF", 
+    "MYR", "IDR", "THB", "VND", "PHP", 
+    "AUD", "GBP", "HKD", "CNY", "KRW"
+]
+
 # ==========================================================
 # 4. MAIN USER INTERFACE & NAVIGATION REDESIGN
 # ==========================================================
@@ -104,60 +122,106 @@ with tab1:
     # --- Tab A: Upload & OCR Scan ---
     with tab_ocr:
         st.subheader("Scan Receipt with AI")
-        uploaded_invoice = st.file_uploader(
-            "Drop or select a receipt/invoice (PNG, JPG, PDF)", 
-            type=["png", "jpg", "jpeg", "pdf"],
-            key="invoice_uploader"
-        )
         
-        if uploaded_invoice is not None:
+        # Dual inputs: File Upload & Mobile Camera Capture
+        col_up1, col_up2 = st.columns(2)
+        with col_up1:
+            uploaded_invoice = st.file_uploader(
+                "Upload receipt image (PNG, JPG, JPEG)", 
+                type=["png", "jpg", "jpeg"],
+                key="invoice_uploader"
+            )
+        with col_up2:
+            camera_invoice = st.camera_input("Or Take a Picture on Mobile", key="camera_uploader")
+
+        # Choose whichever file standard is available
+        active_invoice = uploaded_invoice or camera_invoice
+
+        if active_invoice is not None:
             st.info("Parsing invoice with AI OCR...")
             try:
-                # 1. Read raw receipt bytes (needed for both OCR and Database BLOB)
-                receipt_bytes = uploaded_invoice.read()
+                # 1. Reset file byte pointer (fixes empty byte read bug)
+                active_invoice.seek(0)
                 
-                # 2. Identify the correct MIME type
-                mime_type = uploaded_invoice.type  # e.g., "image/png", "application/pdf"
+                # 2. Identify MIME type
+                mime_type = getattr(active_invoice, 'type', 'image/jpeg')
+                if not mime_type or mime_type == 'application/octet-stream':
+                    mime_type = "image/jpeg"
                 
-                # Call extraction pipeline
-                extracted_data = extract_receipt_data(receipt_bytes, mime_type=mime_type)
+                # 3. Call extraction pipeline directly with file object
+                extracted_data = extract_receipt_data(active_invoice, mime_type=mime_type)
+                
+                # Read raw bytes once for SQLite BLOB storage
+                active_invoice.seek(0)
+                receipt_bytes = active_invoice.read()
                 
                 # Extract the parsed dynamic values
-                extracted_merchant = extracted_data.get('organization', 'Unknown Merchant')
-                extracted_amount = float(extracted_data.get('total_amount', 0.0))
-                extracted_orig_amount = float(extracted_data.get('original_amount', 0.0))
-                extracted_currency = extracted_data.get('currency', 'SGD')
-                extracted_date = extracted_data.get('date', datetime.today().strftime("%Y-%m-%d"))
-                extracted_category = extracted_data.get('category', 'Miscellaneous')
+                ext_merchant = extracted_data.get('organization', 'Unknown Merchant')
+                ext_orig_amount = float(extracted_data.get('original_amount', 0.0))
+                ext_currency = extracted_data.get('currency', 'SGD')
+                ext_sgd_amount = float(extracted_data.get('total_amount', 0.0))
                 
-                # Display the extracted results to the user for validation
-                st.success("✅ Extraction Complete!")
-                st.write(f"**Extracted Merchant:** {extracted_merchant}")
-                st.write(f"**Extracted Total:** ${extracted_amount:.2f} {extracted_currency}")
-                st.write(f"**Suggested Category:** {extracted_category}")
-                st.write(f"**Invoice Date:** {extracted_date}")
+                raw_date = extracted_data.get('date', datetime.today().strftime("%Y-%m-%d"))
+                try:
+                    ext_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
+                except Exception:
+                    ext_date = datetime.today().date()
+                    
+                ext_category = extracted_data.get('category', 'Miscellaneous')
+                if ext_category not in ALL_CATEGORIES:
+                    ext_category = "Miscellaneous"
+
+                st.success("✅ Extraction Complete! Verify details below before saving:")
                 
-                # 3. COMMIT TO DATABASE ON USER CONFIRMATION
-                if st.button("Confirm & Save Extracted Expense", key="save_ocr"):
+                # 4. Form for user validation and quick edits
+                with st.form("confirm_ocr_form"):
+                    col_f1, col_f2 = st.columns(2)
+                    with col_f1:
+                        confirm_date = st.date_input("Date", value=ext_date)
+                        confirm_merchant = st.text_input("Merchant Name", value=ext_merchant)
+                        confirm_category = st.selectbox(
+                            "Category", 
+                            ALL_CATEGORIES, 
+                            index=ALL_CATEGORIES.index(ext_category)
+                        )
+                    
+                    with col_f2:
+                        confirm_orig_amount = st.number_input(
+                            "Original Amount", 
+                            min_value=0.0, 
+                            value=ext_orig_amount, 
+                            step=0.01, 
+                            format="%.2f"
+                        )
+                        curr_index = ALL_CURRENCIES.index(ext_currency) if ext_currency in ALL_CURRENCIES else 0
+                        confirm_currency = st.selectbox("Currency", ALL_CURRENCIES, index=curr_index)
+                        
+                        # Recalculate SGD amount dynamically if user modifies inputs
+                        calc_rate = get_exchange_rate(confirm_currency, "SGD")
+                        confirm_sgd_amount = round(confirm_orig_amount * calc_rate, 2)
+                        st.caption(f"Converted Amount: **${confirm_sgd_amount:.2f} SGD** (Rate: {calc_rate:.4f})")
+                    
+                    save_ocr_submitted = st.form_submit_button("💾 Confirm & Save Extracted Expense", type="primary")
+                
+                if save_ocr_submitted:
                     conn = sqlite3.connect("expenses.db")
                     cursor = conn.cursor()
                     cursor.execute('''
                         INSERT INTO expenses (date, organization, amount, category, currency, original_amount, receipt_file)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                     ''', (
-                        extracted_date, 
-                        extracted_merchant, 
-                        extracted_amount, 
-                        extracted_category, 
-                        extracted_currency, 
-                        extracted_orig_amount, 
-                        receipt_bytes  # Saves the actual file as a BLOB
+                        confirm_date.strftime("%Y-%m-%d"), 
+                        confirm_merchant, 
+                        confirm_sgd_amount, 
+                        confirm_category, 
+                        confirm_currency, 
+                        confirm_orig_amount, 
+                        receipt_bytes
                     ))
                     conn.commit()
                     conn.close()
                     
-                    st.toast("OCR Claim saved successfully!", icon="💾")
-                    
+                    st.toast("Expense saved successfully!", icon="💾")
                     st.cache_data.clear()
                     st.rerun()
                     
@@ -174,19 +238,9 @@ with tab1:
             with col_amount:
                 amount = st.number_input("Amount", min_value=0.0, step=0.01, format="%.2f")
             with col_curr:
-                currency = st.selectbox("Currency", [
-                    "SGD", "USD", "EUR", "JPY", "CHF", 
-                    "MYR", "IDR", "THB", "VND", "PHP", 
-                    "AUD", "GBP", "HKD", "CNY", "KRW"
-                ])
+                currency = st.selectbox("Currency", ALL_CURRENCIES)
                 
-            category = st.selectbox("Category", [
-                "Meals & Entertainment", 
-                "Transport & Flights", 
-                "Accommodation", 
-                "Office Supplies", 
-                "Miscellaneous"
-            ])
+            category = st.selectbox("Category", ALL_CATEGORIES)
             
             manual_attachment = st.file_uploader("Attach PDF/Image copy (Optional)", type=["png", "jpg", "jpeg", "pdf"], key="manual_file")
             submitted = st.form_submit_button("💾 Save Expense")
@@ -388,7 +442,7 @@ with tab3:
                 key="analytics_time_filter"
             )
             
-        # Get unique years, months, and weeks from our dataset for the selection dropdowns
+        # Get unique years, months, and weeks from dataset for selection dropdowns
         df_for_filtering = df.copy()
         df_for_filtering['year'] = df_for_filtering['date'].dt.year
         df_for_filtering['month_name'] = df_for_filtering['date'].dt.strftime('%B %Y')
@@ -397,7 +451,7 @@ with tab3:
         # Format weeks nicely for selection
         df_for_filtering['week_label'] = df_for_filtering['week_commencing'].dt.strftime('Week of %d %b %Y')
 
-        # Dropdowns based on the radio selection
+        # Dropdowns based on radio selection
         with filter_col2:
             if "Specific Month" in time_filter_type:
                 unique_months = sorted(df_for_filtering['month_name'].unique(), reverse=True)
@@ -422,11 +476,11 @@ with tab3:
 
         # 2. RUN GRAPH CALCULATIONS ON FILTERED DATA
         if not analytics_df.empty:
-            # Aggregate trends for the filtered dataset
+            # Aggregate trends for filtered dataset
             df_trend = analytics_df.groupby('date')['amount'].sum().reset_index().rename(columns={'amount': 'total_amount'})
             df_trend = df_trend.sort_values(by='date')
             
-            # Aggregate category breakdowns for the filtered dataset
+            # Aggregate category breakdowns for filtered dataset
             df_category = analytics_df.groupby('category')['amount'].sum().reset_index().rename(columns={'amount': 'total_amount'})
             df_category = df_category.sort_values(by='total_amount', ascending=False)
             
@@ -458,7 +512,7 @@ with tab3:
                     values="total_amount", 
                     names="category",
                     hole=0.4,
-                    color_discrete_sequence=px.colors.qualitative.Safe # Accessible, colorblind-friendly palette
+                    color_discrete_sequence=px.colors.qualitative.Safe # Colorblind-friendly palette
                 )
                 fig_pie.update_layout(margin=dict(l=15, r=15, t=25, b=15))
                 fig_pie.update_traces(textposition='inside', textinfo='percent+label')
