@@ -12,7 +12,7 @@ import io
 
 load_dotenv()
 
-# Adaptive OS detection strategy for cloud deployment
+# Adaptive OS detection strategy
 if sys.platform.startswith('win'):
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 else:
@@ -40,27 +40,15 @@ def get_exchange_rate(from_currency: str, to_currency: str = "SGD") -> float:
     return fallbacks.get(from_currency, 1.0)
 
 
-def preprocess_image(image_bytes: bytes) -> Image.Image:
-    """Corrects mobile orientation and improves contrast for OCR engine."""
-    img = Image.open(io.BytesIO(image_bytes))
-    img = ImageOps.exif_transpose(img) # Rotate according to EXIF data
-    img = img.convert('L') # Convert to grayscale
-    
-    # Increase contrast
-    enhancer = ImageEnhance.Contrast(img)
-    return enhancer.enhance(1.8)
-
-
 def infer_category(text: str) -> str:
-    """Keyword mapping engine for category fallback."""
     clean_text = text.upper()
     keywords = {
-        "Healthcare": ["POLYCLINIC", "CLINIC", "HEALTHCARE", "DOCTOR", "HOSPITAL", "PHARMACY", "SINGHEALTH", "NATIONAL HEALTHCARE", "PATIENT", "MEDICINE", "CONSULTATION"],
-        "Dining": ["RESTAURANT", "CAFÉ", "CAFE", "STARBUCKS", "MCDONALD", "KFC", "FOOD", "DINING", "BISTRO", "BAR", "COFFEE", "BAKERY", "EATERY", "SUBWAY", "MEAL"],
-        "Transport": ["GRAB", "TAXI", "UBER", "COMFORT", "SMRT", "TRANSIT", "AIRPORT", "SHELL", "PETROL", "PARKING", "BUS", "LTA", "RIDE"],
-        "Grocery": ["FAIRPRICE", "COLD STORAGE", "SHENG SIONG", "GIANT", "SUPERMARKET", "GROCERY", "DON DON DONKI", "NTUC", "MART"],
+        "Healthcare": ["POLYCLINIC", "CLINIC", "HEALTHCARE", "DOCTOR", "HOSPITAL", "PHARMACY", "SINGHEALTH", "NATIONAL HEALTHCARE", "PATIENT", "MEDICINE", "CONSULTATION", "NHGP"],
+        "Dining": ["RESTAURANT", "CAFÉ", "CAFE", "STARBUCKS", "MCDONALD", "KFC", "FOOD", "DINING", "BISTRO", "BAR", "COFFEE", "BAKERY", "EATERY", "SUBWAY", "MEAL", "KOI", "LIHO"],
+        "Transport": ["GRAB", "TAXI", "UBER", "COMFORT", "SMRT", "TRANSIT", "AIRPORT", "SHELL", "PETROL", "PARKING", "BUS", "LTA", "RIDE", "EZ-LINK"],
+        "Grocery": ["FAIRPRICE", "COLD STORAGE", "SHENG SIONG", "GIANT", "SUPERMARKET", "GROCERY", "DON DON DONKI", "NTUC", "MART", "WATSONS", "GUARDIAN"],
         "Lodging": ["HOTEL", "HOSTEL", "INN", "SUITES", "AIRBNB", "RESORT", "LODGING", "STAY", "MOTEL"],
-        "Utilities": ["TELECOM", "SINGTEL", "STARHUB", "M1", "ELECTRIC", "WATER", "POWER", "UTILITIES"]
+        "Utilities": ["TELECOM", "SINGTEL", "STARHUB", "M1", "ELECTRIC", "WATER", "POWER", "UTILITIES", "SP GROUP"]
     }
     for category, term_list in keywords.items():
         if any(term in clean_text for term in term_list):
@@ -69,14 +57,12 @@ def infer_category(text: str) -> str:
 
 
 def parse_total_amount(text: str) -> float:
-    """Extracts numerical monetary values from raw receipt OCR text."""
     clean_text = text.upper()
     
-    # Target regex for explicit total indicators
+    # 1. Direct Regex for explicitly labeled totals
     patterns = [
         r'(?:NETT\s*PAYABLE|TOTAL\s*AMT|GRAND\s*TOTAL|TOTAL\s*DUE|AMOUNT\s*DUE|TOTAL|NET)\s*[:\$]?\s*([0-9]+\.[0-9]{2})',
-        r'(?:SGD|USD|EUR|MYR|JPY)\s*[\$]?\s*([0-9]+\.[0-9]{2})',
-        r'TOTAL[\s\S]*?([0-9]+\.[0-9]{2})'
+        r'(?:SGD|USD|EUR|MYR|JPY)\s*[\$]?\s*([0-9]+\.[0-9]{2})'
     ]
     
     for pattern in patterns:
@@ -87,11 +73,13 @@ def parse_total_amount(text: str) -> float:
             except ValueError:
                 continue
 
-    # Fallback: Find all valid decimal amounts ($xx.xx format) and select the maximum value
+    # 2. Extract all decimal numbers ($XX.XX) and choose max (receipt total is almost always the max value)
     amounts = re.findall(r'\b[0-9]+\.[0-9]{2}\b', text)
     if amounts:
         try:
-            return max([float(a) for a in amounts])
+            valid_floats = [float(a) for a in amounts if float(a) < 10000.0]
+            if valid_floats:
+                return max(valid_floats)
         except ValueError:
             pass
             
@@ -99,17 +87,18 @@ def parse_total_amount(text: str) -> float:
 
 
 def fallback_local_ocr(image_bytes: bytes) -> dict:
-    """Executes local Tesseract parsing if Vision API is unreachable."""
     try:
-        processed_img = preprocess_image(image_bytes)
-        full_text = pytesseract.image_to_string(processed_img)
+        img = Image.open(io.BytesIO(image_bytes))
+        img = ImageOps.exif_transpose(img).convert('L')
+        img = ImageEnhance.Contrast(img).enhance(1.8)
+        
+        full_text = pytesseract.image_to_string(img)
         lines = [line.strip() for line in full_text.split('\n') if line.strip()]
 
         org = lines[0] if lines else "Unknown Merchant"
         amount = parse_total_amount(full_text)
         cat = infer_category(full_text)
 
-        # Date Regex
         dt = "2026-07-20"
         date_match = re.search(r'(\d{2})[/.-](\d{2})[/.-](\d{4})', full_text)
         if date_match:
@@ -124,7 +113,7 @@ def fallback_local_ocr(image_bytes: bytes) -> dict:
             "category": cat
         }
     except Exception as e:
-        print(f"Fallback Execution Failed: {e}")
+        print(f"Fallback Error: {e}")
         return {
             "organization": "Unknown Merchant",
             "original_amount": 0.0,
@@ -135,10 +124,28 @@ def fallback_local_ocr(image_bytes: bytes) -> dict:
         }
 
 
-def extract_receipt_data(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
-    """Primary extraction via Groq Vision API with structured JSON output enforcement."""
+def extract_receipt_data(image_input, mime_type: str = "image/jpeg") -> dict:
+    """
+    Accepts both raw bytes or Streamlit's UploadedFile object and auto-resets read pointers.
+    """
+    # Fix Streamlit BytesIO pointer exhaustion
+    if hasattr(image_input, "seek"):
+        image_input.seek(0)
+        image_bytes = image_input.read()
+    elif isinstance(image_input, bytes):
+        image_bytes = image_input
+    else:
+        image_bytes = b""
+
     if not image_bytes:
-        return fallback_local_ocr(image_bytes)
+        return {
+            "organization": "Unknown Merchant",
+            "original_amount": 0.0,
+            "currency": "SGD",
+            "total_amount": 0.0,
+            "date": "2026-07-20",
+            "category": "Miscellaneous"
+        }
 
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
@@ -149,17 +156,13 @@ def extract_receipt_data(image_bytes: bytes, mime_type: str = "image/jpeg") -> d
     data_url = f"data:{mime_type};base64,{base64_image}"
 
     prompt = """
-    Extract data from this receipt into JSON format with these exact keys:
-    {
-      "organization": "Merchant Name",
-      "original_amount": 0.00,
-      "currency": "SGD",
-      "date": "YYYY-MM-DD",
-      "category": "Dining"
-    }
-    Rules:
-    - category must strictly be one of: [Dining, Grocery, Transport, Utilities, Lodging, Healthcare, Miscellaneous].
-    - original_amount must be the final net total payable float value.
+    Extract information from this receipt/invoice and return ONLY a single JSON object.
+    Keys required:
+    - organization: Merchant/Clinic/Entity name string.
+    - original_amount: Final total amount paid as float.
+    - currency: 3-letter currency code (e.g. SGD, USD).
+    - date: Date string as YYYY-MM-DD.
+    - category: Exactly one of [Dining, Grocery, Transport, Utilities, Lodging, Healthcare, Miscellaneous].
     """
 
     try:
@@ -173,6 +176,7 @@ def extract_receipt_data(image_bytes: bytes, mime_type: str = "image/jpeg") -> d
                 ]
             }],
             response_format={"type": "json_object"},
+            reasoning_format="hidden", # Critical fix for Qwen reasoning JSON output on Groq
             temperature=0.1
         )
 
@@ -185,7 +189,7 @@ def extract_receipt_data(image_bytes: bytes, mime_type: str = "image/jpeg") -> d
         dt = parsed_json.get("date") or "2026-07-20"
         cat = parsed_json.get("category") or "Miscellaneous"
 
-        # Patch missing vision fields using local fallback logic
+        # If vision model fails to parse specific fields, fall back locally to fill missing items
         if orig_amount == 0.0 or cat == "Miscellaneous":
             local_res = fallback_local_ocr(image_bytes)
             if orig_amount == 0.0:
@@ -203,5 +207,5 @@ def extract_receipt_data(image_bytes: bytes, mime_type: str = "image/jpeg") -> d
             "category": cat
         }
     except Exception as e:
-        print(f"Groq API Call Error: {e}")
+        print(f"Groq API Exception: {e}")
         return fallback_local_ocr(image_bytes)
