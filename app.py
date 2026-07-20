@@ -120,10 +120,10 @@ with tab1:
     tab_ocr, tab_manual = st.tabs(["📸 OCR Receipt Scan", "✏️ Manual Entry"])
     
     # --- Tab A: Upload & OCR Scan ---
+    # --- Tab A: Upload & OCR Scan ---
     with tab_ocr:
         st.subheader("Scan Receipt with AI")
         
-        # Dual inputs: File Upload & Mobile Camera Capture
         col_up1, col_up2 = st.columns(2)
         with col_up1:
             uploaded_invoice = st.file_uploader(
@@ -134,28 +134,22 @@ with tab1:
         with col_up2:
             camera_invoice = st.camera_input("Or Take a Picture on Mobile", key="camera_uploader")
 
-        # Choose whichever file standard is available
         active_invoice = uploaded_invoice or camera_invoice
 
         if active_invoice is not None:
             st.info("Parsing invoice with AI OCR...")
             try:
-                # 1. Reset file byte pointer (fixes empty byte read bug)
-                active_invoice.seek(0)
+                # 1. Read raw bytes explicitly
+                receipt_bytes = active_invoice.getvalue()
                 
                 # 2. Identify MIME type
                 mime_type = getattr(active_invoice, 'type', 'image/jpeg')
                 if not mime_type or mime_type == 'application/octet-stream':
                     mime_type = "image/jpeg"
                 
-                # 3. Call extraction pipeline directly with file object
-                extracted_data = extract_receipt_data(active_invoice, mime_type=mime_type)
+                # 3. Call OCR pipeline with raw bytes
+                extracted_data = extract_receipt_data(receipt_bytes, mime_type=mime_type)
                 
-                # Read raw bytes once for SQLite BLOB storage
-                active_invoice.seek(0)
-                receipt_bytes = active_invoice.read()
-                
-                # Extract the parsed dynamic values
                 ext_merchant = extracted_data.get('organization', 'Unknown Merchant')
                 ext_orig_amount = float(extracted_data.get('original_amount', 0.0))
                 ext_currency = extracted_data.get('currency', 'SGD')
@@ -173,7 +167,7 @@ with tab1:
 
                 st.success("✅ Extraction Complete! Verify details below before saving:")
                 
-                # 4. Form for user validation and quick edits
+                # Form for user verification/edits
                 with st.form("confirm_ocr_form"):
                     col_f1, col_f2 = st.columns(2)
                     with col_f1:
@@ -196,7 +190,6 @@ with tab1:
                         curr_index = ALL_CURRENCIES.index(ext_currency) if ext_currency in ALL_CURRENCIES else 0
                         confirm_currency = st.selectbox("Currency", ALL_CURRENCIES, index=curr_index)
                         
-                        # Recalculate SGD amount dynamically if user modifies inputs
                         calc_rate = get_exchange_rate(confirm_currency, "SGD")
                         confirm_sgd_amount = round(confirm_orig_amount * calc_rate, 2)
                         st.caption(f"Converted Amount: **${confirm_sgd_amount:.2f} SGD** (Rate: {calc_rate:.4f})")
